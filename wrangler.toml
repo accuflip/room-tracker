@@ -10,14 +10,14 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "room-tracker"
-database_id = "a237d618-d5f6-4401-a52b-589463a89031"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
 [triggers]
 crons = ["* * * * *"]   # reminder check, once a minute
 
 [vars]
 # Full https URL of the deployed app (used in reminder links), no trailing slash.
-PUBLIC_URL = "https://room-tracker.duracraftboat.workers.dev"
+PUBLIC_URL = "https://room-tracker.YOURNAME.workers.dev"
 # Firebase *web* config (this is public by design). Paste the JSON from Firebase console >
 # Project settings > Your apps > Web app, on one line.
 FIREBASE_WEB_CONFIG = '{"apiKey":"","authDomain":"","projectId":"","messagingSenderId":"","appId":""}'
