@@ -1,0 +1,29 @@
+name = "room-tracker"
+main = "src/worker.js"
+compatibility_date = "2025-10-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "room-tracker"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[triggers]
+crons = ["* * * * *"]   # reminder check, once a minute
+
+[vars]
+# Full https URL of the deployed app (used in reminder links), no trailing slash.
+PUBLIC_URL = "https://room-tracker.YOURNAME.workers.dev"
+# Firebase *web* config (this is public by design). Paste the JSON from Firebase console >
+# Project settings > Your apps > Web app, on one line.
+FIREBASE_WEB_CONFIG = '{"apiKey":"","authDomain":"","projectId":"","messagingSenderId":"","appId":""}'
+# Web Push certificate key pair "public key" from Firebase console > Cloud Messaging.
+FIREBASE_VAPID_KEY = ""
+
+# Secrets (set with `wrangler secret put` or the dashboard, NOT in this file):
+#   ADMIN_PASSCODE       the physician's login passcode
+#   FCM_SERVICE_ACCOUNT  the Firebase service-account JSON (one line)
