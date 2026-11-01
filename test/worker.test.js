@@ -35,7 +35,7 @@ const assets = {
     return new Response(fs.readFileSync(f), { headers: { 'content-type': 'text/plain' } });
   },
 };
-const env = { DB: makeD1(), ASSETS: assets, ADMIN_PASSCODE: 'correct horse', PUBLIC_URL: ORIGIN,
+const env = { DB: makeD1(), ASSETS: assets, ADMIN_PASSCODE: 'correct horse', MA_PASSCODE: 'ma pass phrase', PUBLIC_URL: ORIGIN,
   FIREBASE_WEB_CONFIG: '{"apiKey":"k","projectId":"p"}', FIREBASE_VAPID_KEY: 'v' };
 
 let sid = '';
@@ -198,6 +198,85 @@ test('static assets are served with headers; service worker injects config', asy
   assert.equal(r.status, 200); assert.ok(r.headers.get('x-content-type-options'));
   const sw = await (await call('GET', '/firebase-messaging-sw.js', undefined, { auth: false })).text();
   assert.match(sw, /initializeApp\(\{"apiKey":"k"/);
+});
+
+test('a visit he is in right now is marked live', async () => {
+  clock = T0 + 24 * 60 * M + 20 * M;                     // still inside the open Room 5 visit from the reminder test
+  const s = await j(await call('GET', '/api/summary?days=1'));
+  const open = s.visits.find(v => v.status === 'unclosed');
+  assert.ok(open && open.live === true);
+});
+
+test('MA role: separate passcode, starts and clears waits, cannot see or change doctor data', async () => {
+  const doctorSid = sid;
+  const lr = await call('POST', '/api/login', { passcode: 'ma pass phrase' }, { auth: false });
+  assert.equal(lr.status, 200);
+  assert.equal((await j(lr)).role, 'ma');
+  const maSid = /sid=([^;]+)/.exec(lr.headers.get('set-cookie'))[1];
+  const D3 = T0 + 2 * 24 * 60 * M;                          // a fresh day with no events
+
+  sid = maSid;
+  // blocked from everything that belongs to the doctor
+  assert.equal((await call('GET', '/api/summary?days=1')).status, 401);
+  assert.equal((await call('GET', '/api/survey-summary')).status, 401);
+  assert.equal((await call('GET', '/api/tags')).status, 401);
+  assert.equal((await call('POST', '/api/tags', { kind: 'room', label: 'x' })).status, 403);
+  assert.equal((await call('POST', '/api/fix', { startId: 1, kind: 'room', time: '10:00' })).status, 403);
+  assert.equal((await call('POST', '/api/settings', { cutoffMin: 5 })).status, 403);
+  assert.equal((await call('GET', '/', undefined, {})).status, 302);       // sent to the rooming page
+  assert.equal((await call('GET', '/ma')).status, 200);
+
+  // MA taps Room 4: a wait starts. Dictation and end-of-day cards do nothing for the MA.
+  clock = D3;
+  let r = await j(await call('POST', '/api/tap', { slug: slugs['Room 4'] }));
+  assert.equal(r.msg, 'Room 4: patient waiting'); assert.equal(r.state, 'wait');
+  assert.equal((await call('POST', '/api/tap', { slug: slugs['Dictation'] })).status, 400);
+  assert.equal((await call('POST', '/api/tap', { slug: slugs['End of day'] })).status, 400);
+  clock = D3 + 2000;
+  assert.equal((await j(await call('POST', '/api/tap', { slug: slugs['Room 4'] }))).dup, true);  // double read ignored
+  assert.equal(env.DB.raw.prepare("SELECT COUNT(*) c FROM events WHERE day='2026-11-02'").get().c, 0); // MA taps never touch his log
+  clock = D3 + 12 * M;
+  let w = await j(await call('GET', '/api/waiting'));
+  assert.equal(w.waiting.length, 1); assert.equal(w.waiting[0].room, 'Room 4'); assert.equal(w.waiting[0].min, 12);
+
+  // doctor sees the wait and tapping in ends it, recording how long he waited
+  sid = doctorSid;
+  w = await j(await call('GET', '/api/waiting'));
+  assert.equal(w.waiting.length, 1);
+  r = await j(await call('POST', '/api/tap', { slug: slugs['Room 4'] }));
+  assert.equal(r.msg, 'In Room 4'); assert.equal(r.detail, 'waited 12 min');
+  assert.equal((await j(await call('GET', '/api/waiting'))).waiting.length, 0);
+  let s = await j(await call('GET', '/api/summary?days=1'));
+  assert.equal(s.totals.avg_wait_min, 12); assert.equal(s.totals.waits_counted, 1);
+  assert.equal(s.rooms.find(x => x.room === 'Room 4').avg_wait_min, 12);
+
+  // his tap into a room nobody roomed adds no wait; MA tap again clears; MA can clear from the list
+  clock = D3 + 20 * M;
+  r = await j(await call('POST', '/api/tap', { slug: slugs['Room 5'] }));
+  assert.equal(r.detail, null);
+  sid = maSid; clock = D3 + 30 * M;
+  await call('POST', '/api/tap', { slug: slugs['Room 5'] });
+  clock = D3 + 40 * M;
+  r = await j(await call('POST', '/api/tap', { slug: slugs['Room 5'] }));
+  assert.equal(r.state, 'waitclear');
+  await call('POST', '/api/tap', { slug: slugs['Room 5'] });          // waiting again
+  clock = D3 + 50 * M;
+  const id = (await j(await call('GET', '/api/waiting'))).waiting[0].id;
+  assert.equal((await call('POST', '/api/waits/cancel', { id })).status, 200);
+  assert.equal((await j(await call('GET', '/api/waiting'))).waiting.length, 0);
+
+  // an old unanswered wait expires overnight and never counts
+  clock = D3 + 60 * M;
+  await call('POST', '/api/tap', { slug: slugs['Room 4'] });
+  clock = D3 + 24 * 60 * M + 3 * 60 * M;
+  await worker.scheduled({}, env);
+  assert.equal(env.DB.raw.prepare("SELECT status FROM room_waits ORDER BY id DESC LIMIT 1").get().status, 'expired');
+
+  // logging out the MA session leaves the doctor's session alone
+  await call('POST', '/api/logout', {});
+  assert.equal((await call('GET', '/api/waiting')).status, 401);
+  sid = doctorSid;
+  assert.equal((await call('GET', '/api/waiting')).status, 200);
 });
 
 test('login lockout after repeated failures', async () => {

@@ -5,7 +5,7 @@ f.addEventListener('submit', async (e) => {
   msg.textContent = '';
   const r = await api('/api/login', { passcode: document.getElementById('pass').value });
   if (!r.ok) { msg.textContent = r.data.error || 'Could not sign in'; return; }
-  let next = new URLSearchParams(location.search).get('next') || '/';
+  let next = new URLSearchParams(location.search).get('next') || (r.data.role === 'ma' ? '/ma' : '/');
   if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) next = '/';
   location.replace(next);
 });

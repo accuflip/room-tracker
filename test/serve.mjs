@@ -22,7 +22,7 @@ const ASSETS = { fetch: async (req) => {
   return new Response(fs.readFileSync(f), { headers: { 'content-type': ct } });
 } };
 const port = Number(process.env.PORT || 8787);
-const env = { DB: D1, ASSETS, ADMIN_PASSCODE: 'demo-pass', PUBLIC_URL: `http://localhost:${port}`, FIREBASE_WEB_CONFIG: '{}', FIREBASE_VAPID_KEY: '' };
+const env = { DB: D1, ASSETS, ADMIN_PASSCODE: 'demo-pass', MA_PASSCODE: 'ma-demo', PUBLIC_URL: `http://localhost:${port}`, FIREBASE_WEB_CONFIG: '{}', FIREBASE_VAPID_KEY: '' };
 
 http.createServer(async (rq, rs) => {
   const chunks = []; for await (const c of rq) chunks.push(c);

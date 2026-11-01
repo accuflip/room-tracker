@@ -83,11 +83,16 @@ function cookie(req, name) {
   }
   return null;
 }
-async function isAuthed(req, env) {
+async function getSession(req, env) {
   const t = cookie(req, 'sid');
-  if (!t || t.length < 20) return false;
-  const row = await env.DB.prepare('SELECT expires FROM sessions WHERE token_hash=?').bind(await sha256(t)).first();
-  return !!row && row.expires > Date.now();
+  if (!t || t.length < 20) return null;
+  const row = await env.DB.prepare('SELECT expires, role FROM sessions WHERE token_hash=?').bind(await sha256(t)).first();
+  return row && row.expires > Date.now() ? { role: row.role || 'doctor' } : null;
+}
+// doctor-only check used by every dashboard / admin route
+async function isAuthed(req, env) {
+  const s = await getSession(req, env);
+  return !!s && s.role === 'doctor';
 }
 function sameOrigin(req, url) {
   const o = req.headers.get('origin');
@@ -141,13 +146,20 @@ export default {
         m = /^\/s\/([^/]+)$/.exec(p);
         if (m && SLUG_RE.test(m[1])) return surveyPage(env, m[1]);
 
-        if (p === '/' || p === '/fix' || p === '/admin') {
-          if (!(await isAuthed(req, env))) return Response.redirect(`${url.origin}/login?next=${encodeURIComponent(p)}`, 302);
+        if (p === '/ma' || p === '/' || p === '/fix' || p === '/admin') {
+          const sess = await getSession(req, env);
+          if (!sess) return Response.redirect(`${url.origin}/login?next=${encodeURIComponent(p)}`, 302);
+          if (p === '/ma') return shell('Rooming', 'ma', 'ma.js', MA_BODY);
+          if (sess.role !== 'doctor') return Response.redirect(`${url.origin}/ma`, 302);
           if (p === '/admin') return shell('Setup', 'admin', 'admin.js', ADMIN_BODY);
           return shell(p === '/fix' ? 'Fix times' : 'Room time', p === '/fix' ? 'fix' : 'dash', 'dash.js', DASH_BODY);
         }
         if (p === '/api/config' && (await isAuthed(req, env))) {
           return json({ firebase: safeJson(env.FIREBASE_WEB_CONFIG), vapidKey: env.FIREBASE_VAPID_KEY || '' });
+        }
+        if (p === '/api/waiting') {
+          if (!(await getSession(req, env))) return json({ error: 'auth' }, 401);
+          return waitingList(env);
         }
         if (p === '/api/summary') return needAuth(req, env, () => summary(env, url));
         if (p === '/api/survey-summary') return needAuth(req, env, () => surveySummary(env));
@@ -161,9 +173,12 @@ export default {
         if (!sameOrigin(req, url)) return json({ error: 'bad origin' }, 403);
         if (p === '/api/login') return login(req, env, url);
         if (p === '/api/survey') return submitSurvey(req, env, url);
-        if (!(await isAuthed(req, env))) return json({ error: 'auth' }, 401);
+        const sess = await getSession(req, env);
+        if (!sess) return json({ error: 'auth' }, 401);
         if (p === '/api/logout') return logout(req, env, url);
-        if (p === '/api/tap') return tap(req, env);
+        if (p === '/api/tap') return tap(req, env, sess);
+        if (p === '/api/waits/cancel') return cancelWait(req, env);
+        if (sess.role !== 'doctor') return json({ error: 'forbidden' }, 403);   // the MA role stops here
         if (p === '/api/fix') return fix(req, env);
         if (p === '/api/tags') return createTag(req, env);
         if (p === '/api/tags/disable') return disableTag(req, env);
@@ -183,6 +198,7 @@ export default {
     const now = Date.now();
     await env.DB.prepare('DELETE FROM sessions WHERE expires < ?').bind(now).run();
     await env.DB.prepare('DELETE FROM login_fails WHERE ts < ?').bind(now - 3600000).run();
+    await env.DB.prepare("UPDATE room_waits SET status='expired' WHERE status='waiting' AND day < ?").bind(localDay(now, opts.timezone)).run();
     const last = await env.DB.prepare('SELECT * FROM events ORDER BY ts DESC, id DESC LIMIT 1').first();
     if (!last) return;
     const done = await env.DB.prepare('SELECT 1 FROM reminders WHERE event_id=?').bind(last.id).first();
@@ -211,14 +227,17 @@ async function login(req, env, url) {
   if (fails.c >= 10) return json({ error: 'Too many attempts. Wait 15 minutes.' }, 429);
   let body = {}; try { body = await req.json(); } catch {}
   const pass = typeof body.passcode === 'string' ? body.passcode : '';
-  if (!env.ADMIN_PASSCODE || !pass || !(await safeEqual(pass, env.ADMIN_PASSCODE))) {
+  let role = null;
+  if (pass && env.ADMIN_PASSCODE && (await safeEqual(pass, env.ADMIN_PASSCODE))) role = 'doctor';
+  else if (pass && env.MA_PASSCODE && (await safeEqual(pass, env.MA_PASSCODE))) role = 'ma';
+  if (!role) {
     await env.DB.prepare('INSERT INTO login_fails (ts) VALUES (?)').bind(now).run();
     return json({ error: 'Wrong passcode' }, 401);
   }
   const token = randToken(32);
   const maxAge = 60 * 60 * 24 * 365;
-  await env.DB.prepare('INSERT INTO sessions (token_hash, expires) VALUES (?,?)').bind(await sha256(token), now + maxAge * 1000).run();
-  return json({ ok: true }, 200, { 'set-cookie': setCookie(url, 'sid', token, maxAge) });
+  await env.DB.prepare('INSERT INTO sessions (token_hash, expires, role) VALUES (?,?,?)').bind(await sha256(token), now + maxAge * 1000, role).run();
+  return json({ ok: true, role }, 200, { 'set-cookie': setCookie(url, 'sid', token, maxAge) });
 }
 async function logout(req, env, url) {
   const t = cookie(req, 'sid');
@@ -227,7 +246,7 @@ async function logout(req, env, url) {
 }
 
 // ---------- tap ----------
-async function tap(req, env) {
+async function tap(req, env, sess) {
   let b = {}; try { b = await req.json(); } catch {}
   if (typeof b.slug !== 'string' || !SLUG_RE.test(b.slug)) return json({ error: 'bad tag' }, 400);
   const tag = await env.DB.prepare('SELECT id, kind, label, active FROM tags WHERE slug=?').bind(b.slug).first();
@@ -236,13 +255,51 @@ async function tap(req, env) {
   const opts = await getOpts(env);
   const now = Date.now();
   const day = localDay(now, opts.timezone);
+  if (sess.role === 'ma') return maTap(env, tag, now, day, opts);
   const last = await lastEventToday(env, day);
   const r = decideTap({ last, tag, now, dupMs: opts.dupMs });
   await insertEvents(env, now, day, r.events);
   let detail = null;
+  if (r.state === 'in' && tag.kind === 'room') {          // he walked in: the patient's wait ends here
+    const waited = await closeWait(env, tag.id, now, day);
+    if (waited != null) detail = 'waited ' + fmtDur(waited);
+  }
   if (r.state === 'out' && last) detail = fmtDur(now - last.ts);
   if (r.state === 'dict_end' && last) detail = fmtDur(now - last.ts);
   return json({ ok: true, msg: r.msg, state: r.state || null, dup: !!r.dup, detail });
+}
+
+// ---------- MA rooming and waits ----------
+async function maTap(env, tag, now, day, opts) {
+  if (tag.kind !== 'room') return json({ error: 'The MA role only uses room cards' }, 400);
+  const w = await env.DB.prepare("SELECT id, start_ts FROM room_waits WHERE room_tag_id=? AND day=? AND status='waiting' ORDER BY start_ts DESC LIMIT 1").bind(tag.id, day).first();
+  if (w && now - w.start_ts < opts.dupMs) return json({ ok: true, msg: 'Already recorded', state: 'dup', dup: true, detail: null });
+  if (w) {
+    await env.DB.prepare("UPDATE room_waits SET status='cancelled', end_ts=? WHERE id=?").bind(now, w.id).run();
+    return json({ ok: true, msg: `${tag.label}: wait cleared`, state: 'waitclear', dup: false, detail: null });
+  }
+  await env.DB.prepare('INSERT INTO room_waits (room_tag_id, room_label, day, start_ts) VALUES (?,?,?,?)').bind(tag.id, tag.label, day, now).run();
+  return json({ ok: true, msg: `${tag.label}: patient waiting`, state: 'wait', dup: false, detail: null });
+}
+async function closeWait(env, tagId, now, day) {
+  const w = await env.DB.prepare("SELECT id, start_ts FROM room_waits WHERE room_tag_id=? AND day=? AND status='waiting' ORDER BY start_ts DESC LIMIT 1").bind(tagId, day).first();
+  if (!w) return null;
+  await env.DB.prepare("UPDATE room_waits SET status='seen', end_ts=? WHERE id=?").bind(now, w.id).run();
+  return now - w.start_ts;
+}
+async function waitingList(env) {
+  const opts = await getOpts(env);
+  const now = Date.now();
+  const rows = (await env.DB.prepare("SELECT id, room_label, start_ts FROM room_waits WHERE day=? AND status='waiting' ORDER BY start_ts").bind(localDay(now, opts.timezone)).all()).results;
+  const t = (ms) => new Intl.DateTimeFormat('en-US', { timeZone: opts.timezone, hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
+  return json({ waiting: rows.map(r => ({ id: r.id, room: r.room_label, since: t(r.start_ts), min: Math.floor((now - r.start_ts) / 60000) })) });
+}
+async function cancelWait(req, env) {
+  let b = {}; try { b = await req.json(); } catch {}
+  const id = Number(b.id);
+  if (!Number.isInteger(id)) return json({ error: 'bad request' }, 400);
+  await env.DB.prepare("UPDATE room_waits SET status='cancelled', end_ts=? WHERE id=? AND status='waiting'").bind(Date.now(), id).run();
+  return json({ ok: true });
 }
 
 // ---------- summary ----------
@@ -256,11 +313,15 @@ async function summary(env, url) {
   const { visits, orphans } = computeVisits(rows, opts);
   const tz = opts.timezone;
   const t = (ms) => ms == null ? null : new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
+  const lastRow = rows.at(-1) || null;   // a visit he is in right now is "live", not "unclosed"
+  const isLiveRoom = (v) => !!lastRow && lastRow.action === 'IN' && lastRow.id === v.id;
+  const isLiveDict = (v) => !!lastRow && lastRow.action === 'DICT' && v.dictStart === lastRow.ts && v.room === lastRow.room_label && v.dictEnd == null;
   const out = visits.map(v => ({
     inId: v.id, day: v.day, room: v.room, start: t(v.start), end: t(v.end),
     room_min: v.roomMs == null ? null : Math.round(v.roomMs / 60000),
     dict_min: v.dictMs == null ? null : Math.round(v.dictMs / 60000),
     dictOpen: v.dictStart != null && v.dictEnd == null,
+    live: isLiveRoom(v), dictLive: isLiveDict(v),
     dictStartId: null, status: v.status, dictCounted: v.dictCounted, inferred: v.inferred, fixed: v.fixed,
   }));
   // attach DICT start ids so the UI can fix dictation end times
@@ -269,6 +330,10 @@ async function summary(env, url) {
   visits.forEach((v, i) => { if (v.dictStart != null) out[i].dictStartId = dictIds.get(`${v.day}|${v.room}|${v.dictStart}`) ?? null; });
 
   const s = summarize(visits);
+  const waitRows = (await env.DB.prepare("SELECT room_label, start_ts, end_ts FROM room_waits WHERE status='seen' AND day>=? AND day<=?").bind(from, today).all()).results
+    .filter(w => w.end_ts - w.start_ts <= 240 * 60000);
+  const waitBy = {}; let waitSum = 0;
+  for (const w of waitRows) { const x = (waitBy[w.room_label] ||= { n: 0, ms: 0 }); x.n++; x.ms += w.end_ts - w.start_ts; waitSum += w.end_ts - w.start_ts; }
   const byRoom = {};
   for (const v of visits) {
     const r = (byRoom[v.room] ||= { room: v.room, n: 0, roomMs: 0, nDict: 0, dictMs: 0 });
@@ -278,6 +343,7 @@ async function summary(env, url) {
   const rooms = Object.values(byRoom).map(r => ({
     room: r.room, n: r.n, avg_room_min: r.n ? Math.round(r.roomMs / r.n / 60000 * 10) / 10 : null,
     avg_dict_min: r.nDict ? Math.round(r.dictMs / r.nDict / 60000 * 10) / 10 : null,
+    avg_wait_min: waitBy[r.room] ? Math.round(waitBy[r.room].ms / waitBy[r.room].n / 6000) / 10 : null,
   })).sort((a, b) => String(a.room).localeCompare(String(b.room), undefined, { numeric: true }));
   const last = rows.at(-1) || null;
   return json({
@@ -288,6 +354,8 @@ async function summary(env, url) {
       avg_dict_min: s.avgDictMs == null ? null : Math.round(s.avgDictMs / 6000) / 10,
       total_room_min: Math.round(s.totalRoomMs / 60000), total_dict_min: Math.round(s.totalDictMs / 60000),
       orphanDictations: orphans.length,
+      avg_wait_min: waitRows.length ? Math.round(waitSum / waitRows.length / 6000) / 10 : null,
+      waits_counted: waitRows.length,
     },
     rooms,
     current: last && (last.action === 'IN' || last.action === 'DICT') && last.day === today
@@ -434,6 +502,7 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));`;
 // ---------- static page bodies ----------
 const DASH_BODY = `<header class="bar"><h1 id="title">Room time</h1><nav><a href="/">Today</a><a href="/fix">Fix</a><a href="/admin">Setup</a></nav></header>
 <main>
+<section id="waiting" class="card waiting hidden"></section>
 <section id="now" class="card hidden"></section>
 <section class="card"><div class="seg" id="range"><button data-d="1" class="on">Today</button><button data-d="7">7 days</button><button data-d="30">30 days</button></div>
 <div id="stats" class="stats"></div></section>
@@ -459,4 +528,12 @@ const ADMIN_BODY = `<header class="bar"><h1>Setup</h1><nav><a href="/">Today</a>
 <label>Reminders stop (hour, 24h)<input id="clinicEndHour" type="number" min="1" max="24"></label>
 <label>Hide survey results until at least this many responses<input id="minSurveyN" type="number" min="3" max="50"></label>
 <button class="btn" type="submit">Save</button><p id="setmsg" class="msg"></p></form></section>
+</main>`;
+
+const MA_BODY = `<header class="bar"><h1>Rooming</h1></header>
+<main>
+<section class="card"><h2>Patients waiting</h2>
+<p class="note">Tap a room's card with this phone when you put a patient in that room. Tap the same card again to clear it. The doctor sees the list and the wait time.</p>
+<div id="list"></div></section>
+<p class="foot"><button class="link" id="logout">Sign out</button></p>
 </main>`;

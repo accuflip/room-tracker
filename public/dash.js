@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 
 if (mode === 'fix') {
   $('title').textContent = 'Fix times';
-  for (const id of ['rooms-card', 'visits-card', 'survey-card', 'push-card']) $(id).classList.add('hidden');
+  for (const id of ['waiting', 'rooms-card', 'visits-card', 'survey-card', 'push-card']) $(id).classList.add('hidden');
   $('range').parentElement.classList.add('hidden');
 }
 for (const b of document.querySelectorAll('#range button')) {
@@ -44,17 +44,17 @@ async function load() {
   // stats
   const s = clear($('stats'));
   s.append(stat('Visits counted', `${t.counted}`), stat('Avg in room', fmt(t.avg_room_min)),
-    stat('Avg dictation', fmt(t.avg_dict_min)), stat('Total in rooms', fmt(t.total_room_min)), stat('Total dictating', fmt(t.total_dict_min)));
+    stat('Avg dictation', fmt(t.avg_dict_min)), stat('Avg wait', fmt(t.avg_wait_min)), stat('Total in rooms', fmt(t.total_room_min)), stat('Total dictating', fmt(t.total_dict_min)));
   // attention
   const attn = clear($('attn')); let n = 0;
   for (const v of d.visits) {
-    if (v.status === 'review' || v.status === 'unclosed') {
+    if (!v.live && (v.status === 'review' || v.status === 'unclosed')) {
       n++; attn.append(fixRow('room', v.inId, `${v.room} · ${v.day} · in at ${v.start}`,
         v.status === 'unclosed' ? 'Never closed. When did you leave?' : 'Closed by a later tap. When did you actually leave?'));
     }
     if (v.dict_min != null && !v.dictCounted && v.dictStartId) {
       n++; attn.append(fixRow('dict', v.dictStartId, `Dictation after ${v.room} · ${v.day}`, 'Dictation ran long before the next tap. When did it end?'));
-    } else if (v.dictOpen && v.dictStartId && !(d.current && d.current.action === 'DICT' && d.today === v.day && v === d.visits[0])) {
+    } else if (v.dictOpen && !v.dictLive && v.dictStartId) {
       n++; attn.append(fixRow('dict', v.dictStartId, `Dictation after ${v.room} · ${v.day}`, 'Never ended. When did it end?'));
     }
   }
@@ -64,9 +64,9 @@ async function load() {
   const rooms = clear($('rooms'));
   if (!d.rooms.length) rooms.append(el('p', { class: 'note' }, 'No visits yet.'));
   else {
-    const tb = el('table', {}, el('thead', {}, el('tr', {}, ...['Room', 'Visits', 'Avg in room', 'Avg dictation'].map(h => el('th', {}, h)))));
+    const tb = el('table', {}, el('thead', {}, el('tr', {}, ...['Room', 'Visits', 'Avg wait', 'Avg in room', 'Avg dictation'].map(h => el('th', {}, h)))));
     const body = el('tbody');
-    for (const x of d.rooms) body.append(el('tr', {}, el('td', {}, x.room), el('td', {}, x.n), el('td', {}, fmt(x.avg_room_min)), el('td', {}, fmt(x.avg_dict_min))));
+    for (const x of d.rooms) body.append(el('tr', {}, el('td', {}, x.room), el('td', {}, x.n), el('td', {}, fmt(x.avg_wait_min)), el('td', {}, fmt(x.avg_room_min)), el('td', {}, fmt(x.avg_dict_min))));
     tb.append(body); rooms.append(tb);
   }
   // visits
@@ -123,6 +123,18 @@ if (pushBtn) pushBtn.addEventListener('click', async () => {
     msg.textContent = r.ok ? 'Reminders are on for this phone.' : 'Could not save.';
   } catch (e) { msg.textContent = e.message || 'Could not turn on reminders.'; }
 });
+async function loadWaiting() {
+  if (mode !== 'dash') return;
+  const r = await api('/api/waiting');
+  if (!r.ok) return;
+  const box = clear($('waiting')), list = r.data.waiting || [];
+  if (!list.length) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  box.append(el('h2', {}, `Waiting for you (${list.length})`));
+  for (const w of list) box.append(el('div', { class: 'waitrow' }, el('strong', {}, w.room), el('span', { class: 'pill' }, w.min + ' min'), el('span', { class: 'note' }, 'roomed ' + w.since)));
+}
+loadWaiting();
+setInterval(() => { if (!document.hidden) loadWaiting(); }, 10000);
 const lo = $('logout');
 if (lo) lo.addEventListener('click', async () => { await api('/api/logout', {}); location.replace('/login'); });
 load();
