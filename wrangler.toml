@@ -10,7 +10,7 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "room-tracker"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "a237d618-d5f6-4401-a52b-589463a89031"
 
 [triggers]
 crons = ["* * * * *"]   # reminder check, once a minute
