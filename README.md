@@ -44,3 +44,18 @@ Note: on iPhone, tapping a tag opens **Safari**, while the Home Screen app is a 
 
 ## Files
 `src/logic.js` rules and calculations · `src/worker.js` routes, auth, survey, cron · `src/fcm.js` push sender · `public/` pages and styles · `schema.sql` · `test/` 13 logic + 13 end-to-end tests
+
+## Waiting board (MA role)
+- A second passcode, `MA_PASSCODE` (Worker secret), signs a phone in as the **MA**. That session can only tap room cards and clear waits. It cannot see the dashboard, times, tags, settings or survey results.
+- MA taps a room card: that room shows as **waiting**. Tap the same card again to clear it. The `/ma` page lists who is waiting, with a Clear button.
+- When the doctor taps **into** that room, the wait ends and is recorded ("waited 12 min"). The dashboard shows a live **Waiting for you** card (refreshes every 10 s) and average wait overall and per room. Waits over 4 hours are left out of averages; unanswered waits expire overnight.
+- Room and time only. No patient names, initials or other identifiers are stored.
+
+### Upgrading a database that already has the first version
+Run this once in the D1 Console **before** deploying the new code (existing doctor sessions stay signed in):
+```
+ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT 'doctor';
+CREATE TABLE IF NOT EXISTS room_waits (id INTEGER PRIMARY KEY AUTOINCREMENT, room_tag_id TEXT NOT NULL, room_label TEXT NOT NULL, day TEXT NOT NULL, start_ts INTEGER NOT NULL, end_ts INTEGER, status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','seen','cancelled','expired')));
+CREATE INDEX IF NOT EXISTS idx_waits_day ON room_waits (day, status);
+```
+Then add the secret `MA_PASSCODE` (a different passphrase from `ADMIN_PASSCODE`).

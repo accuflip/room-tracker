@@ -34,8 +34,21 @@ CREATE TABLE IF NOT EXISTS survey_responses (
 
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,              -- SHA-256 of the cookie value
-  expires    INTEGER NOT NULL
+  expires    INTEGER NOT NULL,
+  role       TEXT NOT NULL DEFAULT 'doctor' -- 'doctor' or 'ma'
 );
+
+-- Patient waits. Room and time only: no names, initials or any patient identifier.
+CREATE TABLE IF NOT EXISTS room_waits (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_tag_id TEXT NOT NULL,
+  room_label  TEXT NOT NULL,
+  day         TEXT NOT NULL,
+  start_ts    INTEGER NOT NULL,             -- MA tapped the room card
+  end_ts      INTEGER,                      -- doctor walked in, or the MA cleared it
+  status      TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','seen','cancelled','expired'))
+);
+CREATE INDEX IF NOT EXISTS idx_waits_day ON room_waits (day, status);
 
 CREATE TABLE IF NOT EXISTS login_fails (ts INTEGER NOT NULL);
 
